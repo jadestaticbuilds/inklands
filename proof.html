@@ -1,0 +1,1101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<title>Inklands: Art Proof</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; height: 100%; overflow: hidden; background: #060302;
+    -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
+    touch-action: none; overscroll-behavior: none;
+  }
+  #stage { position: fixed; inset: 0; height: 100dvh; }
+  canvas { display: block; }
+  .serif { font-family: Georgia, 'Times New Roman', serif; }
+  #titleBlock {
+    position: fixed; top: calc(14px + env(safe-area-inset-top)); left: 18px;
+    color: #d9ba8a; pointer-events: none; z-index: 5;
+    text-shadow: 0 2px 14px rgba(0,0,0,.9);
+  }
+  #titleBlock .name { font-size: 21px; letter-spacing: .42em; }
+  #titleBlock .sub { font-size: 11.5px; letter-spacing: .14em; opacity: .72; margin-top: 4px; font-style: italic; }
+  #proofChip {
+    position: fixed; top: calc(14px + env(safe-area-inset-top)); right: 16px; z-index: 5;
+    color: #c9a86a; border: 1px solid rgba(201,168,106,.45); border-radius: 999px;
+    padding: 6px 12px; font-size: 10.5px; letter-spacing: .3em; pointer-events: none;
+    background: rgba(10,5,2,.42); backdrop-filter: blur(3px);
+  }
+  #bar {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 6;
+    display: flex; flex-direction: column; align-items: center; gap: 9px;
+    padding: 12px 16px 34px;
+    padding-bottom: max(34px, calc(10px + env(safe-area-inset-bottom)));
+    background: linear-gradient(to top, rgba(5,2,0,.78), rgba(5,2,0,0));
+  }
+  #hint {
+    color: rgba(232,205,160,.75); font-size: 12px; letter-spacing: .08em;
+    text-align: center; pointer-events: none; font-style: italic;
+  }
+  #chips { display: flex; gap: 10px; }
+  .chip {
+    font-family: Georgia, 'Times New Roman', serif;
+    color: #d9ba8a; background: rgba(16,8,3,.66); border: 1px solid rgba(201,168,106,.5);
+    border-radius: 999px; padding: 11px 22px; font-size: 13px; letter-spacing: .26em;
+    cursor: pointer; min-width: 108px; text-align: center;
+  }
+  .chip.on { background: rgba(122,84,32,.85); color: #ffe9bb; border-color: #e8c987; }
+  #veil {
+    position: fixed; inset: 0; z-index: 20; background: #060302;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px;
+    color: #d9ba8a; transition: opacity 1.1s ease;
+  }
+  #veil .name { font-size: 26px; letter-spacing: .5em; margin-left: .5em; }
+  #veil .msg { font-size: 12.5px; letter-spacing: .18em; opacity: .7; font-style: italic; }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<div id="titleBlock" class="serif">
+  <div class="name">INKLANDS</div>
+  <div class="sub">a valley in light and water</div>
+</div>
+<div id="proofChip" class="serif">ART PROOF</div>
+<div id="bar">
+  <div id="hint" class="serif">Drag to sculpt the valley. On release, the river finds its new path.</div>
+  <div id="chips">
+    <div class="chip on" id="chipRaise">RAISE</div>
+    <div class="chip" id="chipLower">LOWER</div>
+  </div>
+</div>
+<div id="veil" class="serif">
+  <div class="name">INKLANDS</div>
+  <div class="msg" id="veilMsg">composing the valley</div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+'use strict';
+/* ================= PURE CORE START =================
+   Valley composition, flow accumulation, channel tracing.
+   No DOM, no THREE. The smoke test extracts and runs this block. */
+function ikMulberry(a){
+  return function(){
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    var t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+function ikClamp(v,a,b){ return v<a?a:(v>b?b:v); }
+function ikLerp(a,b,t){ return a + (b-a)*t; }
+function ikSmooth(a,b,v){ var t = ikClamp((v-a)/(b-a),0,1); return t*t*(3-2*t); }
+
+var IK_GRID = 160;                 /* segments per side; lattice is 161 x 161 */
+var IK_SPAN = 120;                 /* world units across */
+var IK_HSCALE = 0.55;              /* cell height units to world units */
+
+var ikNoiseTab = (function(){
+  var rng = ikMulberry(1379), tab = new Float32Array(256*256), i;
+  for(i=0;i<tab.length;i++) tab[i] = rng();
+  return tab;
+})();
+function ikNoise(x, y){
+  var x0 = Math.floor(x), y0 = Math.floor(y);
+  var fx = x - x0, fy = y - y0;
+  var sx = fx*fx*(3-2*fx), sy = fy*fy*(3-2*fy);
+  function at(xx, yy){
+    xx = ((xx % 256) + 256) % 256; yy = ((yy % 256) + 256) % 256;
+    return ikNoiseTab[yy*256 + xx];
+  }
+  return ikLerp(ikLerp(at(x0,y0), at(x0+1,y0), sx), ikLerp(at(x0,y0+1), at(x0+1,y0+1), sx), sy);
+}
+function ikChannelX(gy){
+  return IK_GRID*0.5 + 17.3*Math.sin(gy*0.0375 + 0.4) + 6.7*Math.sin(gy*0.0128);
+}
+var IK_PAV = (function(){
+  var py = Math.round(IK_GRID*0.55);
+  return { x: Math.round(ikChannelX(py)) + 22, y: py };
+})();
+var IK_SPRING = (function(){
+  return { x: Math.round(ikChannelX(10)), y: 10 };
+})();
+
+function ikHeightAt(gx, gy){
+  var base = 20 - gy*0.0825;                       /* land falls toward the front */
+  var xc = ikChannelX(gy);
+  var d = Math.abs(gx - xc);
+  var v = base + 22*Math.pow(ikClamp(d/77, 0, 1), 1.6);   /* valley walls */
+  v -= 2.2*Math.exp(-(d*d)/(4.7*4.7));                     /* carved channel */
+  if(gy < 21) v += (21-gy)*0.41*(0.35 + 0.65*Math.abs(gx - IK_GRID/2)/(IK_GRID/2)); /* spring cleft */
+  var tmask = ikSmooth(12, 21, d) * (1 - ikSmooth(51, 67, d));   /* terraced mid-slopes */
+  var q = Math.round(v/2.6)*2.6;
+  v = ikLerp(v, q, 0.55*tmask);
+  v += (ikNoise(gx*0.115, gy*0.115)-0.5)*1.5 + (ikNoise(gx*0.38, gy*0.38)-0.5)*0.4;
+  /* pavilion plateau */
+  var dp = Math.hypot(gx - IK_PAV.x, gy - IK_PAV.y);
+  if(dp < 10.7){
+    var plateau = (20 - IK_PAV.y*0.0825 - 2.2) + 1.8;
+    v = ikLerp(plateau, v, ikSmooth(7.3, 10.7, dp));
+  }
+  /* spring basin */
+  var dd = Math.hypot(gx - IK_SPRING.x, gy - IK_SPRING.y);
+  if(dd < 4.5) v -= 1.5*(1 - dd/4.5);
+  return v;
+}
+
+function ikBuildHeights(){
+  var N = IK_GRID + 1, H = new Float32Array(N*N), x, y;
+  for(y=0;y<N;y++) for(x=0;x<N;x++) H[y*N + x] = ikHeightAt(x, y);
+  return H;
+}
+
+/* D8 flow: every cell drains to its lowest neighbour; accumulation is
+   summed in descending height order, so the main channel emerges. */
+function ikComputeFlow(H){
+  var N = IK_GRID + 1, n = N*N;
+  var dir = new Int32Array(n), acc = new Float32Array(n);
+  var order = new Uint32Array(n), i, x, y;
+  for(i=0;i<n;i++){ dir[i] = -1; acc[i] = 1; order[i] = i; }
+  var DIRS = [[1,0],[-1,0],[0,1],[0,-1],[1,1],[1,-1],[-1,1],[-1,-1]];
+  for(y=0;y<N;y++) for(x=0;x<N;x++){
+    i = y*N + x;
+    var best = H[i], bi = -1, k, nx, ny, ni;
+    for(k=0;k<8;k++){
+      nx = x + DIRS[k][0]; ny = y + DIRS[k][1];
+      if(nx<0 || ny<0 || nx>=N || ny>=N) continue;
+      ni = ny*N + nx;
+      if(H[ni] < best){ best = H[ni]; bi = ni; }
+    }
+    dir[i] = bi;
+  }
+  var idxArr = Array.prototype.slice.call(order);
+  idxArr.sort(function(a,b){ return H[b] - H[a]; });
+  for(var o=0;o<n;o++){
+    i = idxArr[o];
+    if(dir[i] >= 0) acc[dir[i]] += acc[i];
+  }
+  return { dir: dir, acc: acc };
+}
+
+/* Depression filling (priority flood): every cell is raised to the level
+   at which its water would spill toward the map edge. On the filled
+   surface a non-ascending route to the edge always exists, which is what
+   lets the traced river climb out of the spring basin and over the small
+   pits the detail noise digs in the channel, exactly as real water does
+   by ponding first. */
+function ikFillDepressions(H){
+  var N = IK_GRID + 1, n = N*N;
+  var filled = new Float32Array(H);
+  var seen = new Uint8Array(n);
+  var heapH = [], heapI = [];
+  function push(h, i){
+    heapH.push(h); heapI.push(i);
+    var c = heapH.length - 1;
+    while(c > 0){
+      var p = (c - 1) >> 1;
+      if(heapH[p] <= heapH[c]) break;
+      var th = heapH[p]; heapH[p] = heapH[c]; heapH[c] = th;
+      var ti = heapI[p]; heapI[p] = heapI[c]; heapI[c] = ti;
+      c = p;
+    }
+  }
+  function pop(){
+    var topH = heapH[0], topI = heapI[0];
+    var lh = heapH.pop(), li = heapI.pop();
+    if(heapH.length){
+      heapH[0] = lh; heapI[0] = li;
+      var c = 0;
+      for(;;){
+        var l = c*2 + 1, r = l + 1, m = c;
+        if(l < heapH.length && heapH[l] < heapH[m]) m = l;
+        if(r < heapH.length && heapH[r] < heapH[m]) m = r;
+        if(m === c) break;
+        var th = heapH[m]; heapH[m] = heapH[c]; heapH[c] = th;
+        var ti = heapI[m]; heapI[m] = heapI[c]; heapI[c] = ti;
+        c = m;
+      }
+    }
+    return [topH, topI];
+  }
+  var parent = new Int32Array(n);
+  for(var q=0;q<n;q++) parent[q] = -1;
+  var x, y, i;
+  for(x=0;x<N;x++){ push(H[x], x); seen[x] = 1; push(H[(N-1)*N + x], (N-1)*N + x); seen[(N-1)*N + x] = 1; }
+  for(y=0;y<N;y++){ push(H[y*N], y*N); seen[y*N] = 1; push(H[y*N + N-1], y*N + N-1); seen[y*N + N-1] = 1; }
+  var DIRS = [[1,0],[-1,0],[0,1],[0,-1],[1,1],[1,-1],[-1,1],[-1,-1]];
+  while(heapH.length){
+    var cur = pop(), ch = cur[0], ci = cur[1];
+    var cx = ci % N, cy = (ci / N) | 0;
+    for(var k=0;k<8;k++){
+      var nx = cx + DIRS[k][0], ny = cy + DIRS[k][1];
+      if(nx<0 || ny<0 || nx>=N || ny>=N) continue;
+      var ni = ny*N + nx;
+      if(seen[ni]) continue;
+      seen[ni] = 1;
+      filled[ni] = Math.max(H[ni], ch);
+      parent[ni] = ci;
+      push(filled[ni], ni);
+    }
+  }
+  return { filled: filled, parent: parent };
+}
+
+/* Trace the main channel by walking the flood tree from the spring to
+   the map edge. Every parent step is non-ascending on the filled surface,
+   so the walk cannot dead-end: it ponds out of the spring basin over its
+   lowest rim cell and then descends the valley like water. */
+function ikTracePath(H, acc){
+  var N = IK_GRID + 1;
+  var flood = ikFillDepressions(H);
+  var parent = flood.parent;
+  var path = [], seen = {};
+  var ci = IK_SPRING.y*N + IK_SPRING.x;
+  for(var step=0; step<1200; step++){
+    if(ci < 0 || seen[ci]) break;
+    seen[ci] = 1;
+    path.push({ x: ci % N, y: (ci / N) | 0, acc: acc[ci] });
+    var cx = ci % N, cy = (ci / N) | 0;
+    if(cx === 0 || cy === 0 || cx === IK_GRID || cy === IK_GRID) break;
+    ci = parent[ci];
+  }
+  return path;
+}
+/* ================= PURE CORE END ================= */
+</script>
+<script>
+'use strict';
+(function(){
+var veilMsg = document.getElementById('veilMsg');
+if(!window.THREE){
+  veilMsg.textContent = 'The painting could not be loaded. Check your connection and reload.';
+  return;
+}
+var REDUCED = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+/* ---------- renderer, scene, camera ---------- */
+var stage = document.getElementById('stage');
+var renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.12;
+renderer.autoClear = true;
+stage.appendChild(renderer.domElement);
+
+var scene = new THREE.Scene();
+scene.background = new THREE.Color(0x050303);
+scene.fog = new THREE.FogExp2(0x070403, 0.0036);
+
+var camera = new THREE.PerspectiveCamera(38, window.innerWidth/window.innerHeight, 0.5, 600);
+camera.position.set(0, 58, 97);
+
+/* ---------- helpers ---------- */
+function gridToWorld(gx, gy){ return { x: (gx/IK_GRID - 0.5)*IK_SPAN, z: (gy/IK_GRID - 0.5)*IK_SPAN }; }
+var HN = IK_GRID + 1;
+var heights = ikBuildHeights();
+function heightWorldAt(gx, gy){
+  gx = ikClamp(gx, 0, IK_GRID); gy = ikClamp(gy, 0, IK_GRID);
+  var x0 = Math.floor(gx), y0 = Math.floor(gy);
+  var x1 = Math.min(IK_GRID, x0+1), y1 = Math.min(IK_GRID, y0+1);
+  var fx = gx - x0, fy = gy - y0;
+  var a = heights[y0*HN + x0], b = heights[y0*HN + x1];
+  var c = heights[y1*HN + x0], d = heights[y1*HN + x1];
+  return ikLerp(ikLerp(a, b, fx), ikLerp(c, d, fx), fy) * IK_HSCALE;
+}
+function terrainYWorld(wx, wz){
+  return heightWorldAt((wx/IK_SPAN + 0.5)*IK_GRID, (wz/IK_SPAN + 0.5)*IK_GRID);
+}
+function makeRadialTex(size, inner, outer){
+  var cv = document.createElement('canvas'); cv.width = cv.height = size;
+  var g = cv.getContext('2d');
+  var grad = g.createRadialGradient(size/2, size/2, size*0.02, size/2, size/2, size/2);
+  grad.addColorStop(0, inner); grad.addColorStop(1, outer);
+  g.fillStyle = grad; g.fillRect(0, 0, size, size);
+  var tx = new THREE.CanvasTexture(cv);
+  return tx;
+}
+var softDotTex = makeRadialTex(64, 'rgba(255,255,255,1)', 'rgba(255,255,255,0)');
+
+/* ---------- backdrop: layered ridge silhouettes on a painted canvas ---------- */
+(function(){
+  var cv = document.createElement('canvas'); cv.width = 1024; cv.height = 448;
+  var g = cv.getContext('2d');
+  var grad = g.createLinearGradient(0, 0, 0, 448);
+  grad.addColorStop(0, '#0a0503'); grad.addColorStop(0.55, '#120a05'); grad.addColorStop(1, '#050302');
+  g.fillStyle = grad; g.fillRect(0, 0, 1024, 448);
+  var glow = g.createRadialGradient(300, 60, 10, 300, 60, 340);
+  glow.addColorStop(0, 'rgba(255,190,110,0.20)'); glow.addColorStop(1, 'rgba(255,190,110,0)');
+  g.fillStyle = glow; g.fillRect(0, 0, 1024, 448);
+  var rng = ikMulberry(41);
+  function ridge(baseY, amp, col){
+    g.fillStyle = col; g.beginPath(); g.moveTo(0, 448);
+    var y = baseY;
+    for(var x=0;x<=1024;x+=32){
+      y = baseY + (rng()-0.5)*amp;
+      g.lineTo(x, y - rng()*amp*0.7);
+    }
+    g.lineTo(1024, 448); g.closePath(); g.fill();
+  }
+  ridge(210, 60, '#0d0805');
+  ridge(268, 46, '#080503');
+  ridge(330, 34, '#040202');
+  var tex = new THREE.CanvasTexture(cv);
+  var m = new THREE.Mesh(
+    new THREE.PlaneGeometry(380, 166),
+    new THREE.MeshBasicMaterial({ map: tex, fog: false })
+  );
+  m.position.set(0, 52, -118);
+  scene.add(m);
+})();
+
+/* ---------- terrain: smooth mesh, vertex-coloured umber washes ---------- */
+var terrainGeo = new THREE.PlaneGeometry(IK_SPAN, IK_SPAN, IK_GRID, IK_GRID);
+terrainGeo.rotateX(-Math.PI/2);
+var terrainMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.94, metalness: 0.0 });
+var terrain = new THREE.Mesh(terrainGeo, terrainMat);
+terrain.castShadow = true;
+terrain.receiveShadow = true;
+scene.add(terrain);
+
+var C_LOW   = new THREE.Color(0x1a0f06);
+var C_UMBER = new THREE.Color(0x2c1a0c);
+var C_MOSS  = new THREE.Color(0x403314);
+var C_GOLD  = new THREE.Color(0x8a6a33);
+var C_ROCK  = new THREE.Color(0x6e5638);
+var tmpC = new THREE.Color();
+function paintVertex(colors, vi, gx, gy){
+  var i = gy*HN + gx, h = heights[i];
+  var sl = 0, v;
+  if(gx>0){ v = Math.abs(h - heights[i-1]); if(v>sl) sl = v; }
+  if(gx<IK_GRID){ v = Math.abs(h - heights[i+1]); if(v>sl) sl = v; }
+  if(gy>0){ v = Math.abs(h - heights[i-HN]); if(v>sl) sl = v; }
+  if(gy<IK_GRID){ v = Math.abs(h - heights[i+HN]); if(v>sl) sl = v; }
+  var d = Math.abs(gx - ikChannelX(gy));
+  var tmask = ikSmooth(12, 21, d) * (1 - ikSmooth(51, 67, d));
+  if(h < 10) tmpC.copy(C_LOW).lerp(C_UMBER, ikSmooth(4, 10, h));
+  else if(h < 20) tmpC.copy(C_UMBER).lerp(C_MOSS, ikSmooth(10, 20, h));
+  else tmpC.copy(C_MOSS).lerp(C_ROCK, ikSmooth(20, 30, h));
+  if(sl < 0.5) tmpC.lerp(C_GOLD, tmask * 0.75 * ikSmooth(0.5, 0.18, sl));  /* worn gold on terrace flats */
+  if(d < 5) tmpC.multiplyScalar(0.55);                                     /* wet dark channel bed */
+  var n = 0.88 + 0.24*ikNoise(gx*0.5, gy*0.5);
+  colors[vi*3] = tmpC.r*n; colors[vi*3+1] = tmpC.g*n; colors[vi*3+2] = tmpC.b*n;
+}
+function syncTerrain(full){
+  var pos = terrainGeo.attributes.position;
+  var colAttr = terrainGeo.attributes.color;
+  if(!colAttr){
+    colAttr = new THREE.BufferAttribute(new Float32Array(pos.count*3), 3);
+    terrainGeo.setAttribute('color', colAttr);
+  }
+  var colors = colAttr.array;
+  for(var vi=0; vi<pos.count; vi++){
+    var wx = pos.getX(vi), wz = pos.getZ(vi);
+    var gx = Math.round((wx/IK_SPAN + 0.5)*IK_GRID), gy = Math.round((wz/IK_SPAN + 0.5)*IK_GRID);
+    pos.setY(vi, heights[gy*HN + gx] * IK_HSCALE);
+    paintVertex(colors, vi, gx, gy);
+  }
+  pos.needsUpdate = true;
+  colAttr.needsUpdate = true;
+  terrainGeo.computeVertexNormals();
+}
+syncTerrain(true);
+
+/* ---------- light: one hard warm shaft, tavern-dark ambient ---------- */
+scene.add(new THREE.AmbientLight(0x38220f, 0.55));
+var spot = new THREE.SpotLight(0xffc98a, 2.4, 320, 0.335, 0.38, 1);
+spot.castShadow = true;
+spot.shadow.mapSize.set(1024, 1024);
+spot.shadow.camera.near = 20;
+spot.shadow.camera.far = 300;
+spot.shadow.bias = -0.0004;
+scene.add(spot);
+scene.add(spot.target);
+
+var beamOrigin = new THREE.Vector3();
+var beamTarget = new THREE.Vector3();
+function updateBeam(t){
+  var s = Math.sin(t * Math.PI*2 / 180);            /* full sweep there and back: 180 s */
+  var tx = -18 + (s*0.5 + 0.5) * 62;                 /* pool travels the valley width */
+  beamTarget.set(tx, 0, 12);
+  beamOrigin.set(tx - 40, 94, -32);
+  spot.position.copy(beamOrigin);
+  spot.target.position.copy(beamTarget);
+  spot.target.updateMatrixWorld();
+  beamGroup.position.copy(beamOrigin);
+  beamGroup.lookAt(beamTarget);
+}
+
+/* ---------- the volumetric shaft and its dust ---------- */
+var beamGroup = new THREE.Group();
+scene.add(beamGroup);
+var BEAM_LEN = 118;
+var beamMat = new THREE.ShaderMaterial({
+  uniforms: { uColor: { value: new THREE.Color(1.0, 0.76, 0.42) }, uOpacity: { value: 0.14 } },
+  vertexShader: [
+    'varying vec2 vUv;',
+    'varying vec3 vN; varying vec3 vV;',
+    'void main(){',
+    '  vUv = uv;',
+    '  vec4 mv = modelViewMatrix * vec4(position, 1.0);',
+    '  vN = normalize(normalMatrix * normal);',
+    '  vV = normalize(-mv.xyz);',
+    '  gl_Position = projectionMatrix * mv;',
+    '}'
+  ].join('\n'),
+  fragmentShader: [
+    'uniform vec3 uColor; uniform float uOpacity;',
+    'varying vec2 vUv; varying vec3 vN; varying vec3 vV;',
+    'void main(){',
+    '  float axial = pow(1.0 - vUv.y, 1.35);',
+    '  float edge = pow(abs(dot(normalize(vN), normalize(vV))), 1.6);',
+    '  float a = uOpacity * axial * edge;',
+    '  gl_FragColor = vec4(uColor, a);',
+    '}'
+  ].join('\n'),
+  transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide, fog: false
+});
+var beamGeo = new THREE.CylinderGeometry(27, 1.4, BEAM_LEN, 24, 1, true);
+beamGeo.rotateX(Math.PI/2);            /* axis to +Z, wide end away from the light */
+beamGeo.translate(0, 0, BEAM_LEN/2);
+var beamMesh = new THREE.Mesh(beamGeo, beamMat);
+beamGroup.add(beamMesh);
+
+var MOTES = REDUCED ? 110 : 240;
+var moteBase = new Float32Array(MOTES*3);
+var motePhase = new Float32Array(MOTES);
+(function(){
+  var rng = ikMulberry(97);
+  for(var i=0;i<MOTES;i++){
+    var z = 6 + rng()*104;
+    var rMax = (1.4 + (27-1.4)*z/BEAM_LEN) * 0.85;
+    var r = rMax * Math.sqrt(rng()), a = rng()*Math.PI*2;
+    moteBase[i*3] = Math.cos(a)*r;
+    moteBase[i*3+1] = Math.sin(a)*r;
+    moteBase[i*3+2] = z;
+    motePhase[i] = rng()*Math.PI*2;
+  }
+})();
+var moteGeo = new THREE.BufferGeometry();
+moteGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(moteBase), 3));
+var motes = new THREE.Points(moteGeo, new THREE.PointsMaterial({
+  map: softDotTex, color: 0xffd9a0, size: 1.5, sizeAttenuation: true,
+  transparent: true, opacity: 0.5, blending: THREE.AdditiveBlending, depthWrite: false
+}));
+beamGroup.add(motes);
+/* ---------- mist bands drifting through the hollows ---------- */
+var mistTex = (function(){
+  var cv = document.createElement('canvas'); cv.width = 512; cv.height = 128;
+  var g = cv.getContext('2d');
+  var rng = ikMulberry(7);
+  for(var i=0;i<46;i++){
+    var x = rng()*512, y = 34 + rng()*60, r = 30 + rng()*70;
+    var grad = g.createRadialGradient(x, y, 1, x, y, r);
+    grad.addColorStop(0, 'rgba(216,198,168,0.055)');
+    grad.addColorStop(1, 'rgba(216,198,168,0)');
+    g.fillStyle = grad;
+    g.fillRect(x-r, y-r, r*2, r*2);
+  }
+  return new THREE.CanvasTexture(cv);
+})();
+var mists = [];
+(function(){
+  var spots = [
+    { x: -26, z: 26, s: 1.2 }, { x: 18, z: 38, s: 1.5 }, { x: -6, z: -6, s: 1.0 },
+    { x: 30, z: -28, s: 1.3 }, { x: -34, z: -34, s: 1.1 }
+  ];
+  for(var i=0;i<spots.length;i++){
+    var sp = spots[i];
+    var m = new THREE.Mesh(
+      new THREE.PlaneGeometry(64*sp.s, 15*sp.s),
+      new THREE.MeshBasicMaterial({ map: mistTex, transparent: true, opacity: 0.55, depthWrite: false, fog: false })
+    );
+    m.position.set(sp.x, terrainYWorld(sp.x, sp.z) + 3.2, sp.z);
+    m.renderOrder = 4;
+    m.userData.phase = i * 1.7;
+    scene.add(m);
+    mists.push(m);
+  }
+})();
+
+/* ---------- the river: a smooth ribbon on the traced channel ---------- */
+var riverUniforms = {
+  uTime: { value: 0 },
+  uHalo: { value: 0 }
+};
+var riverVert = [
+  'attribute float aFall;',
+  'attribute float aLit;',
+  'varying vec2 vUv; varying float vFall; varying float vLit;',
+  'void main(){',
+  '  vUv = uv; vFall = aFall; vLit = aLit;',
+  '  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);',
+  '}'
+].join('\n');
+var riverFrag = [
+  'uniform float uTime; uniform float uHalo;',
+  'varying vec2 vUv; varying float vFall; varying float vLit;',
+  'float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }',
+  'float vnoise(vec2 p){',
+  '  vec2 i = floor(p), f = fract(p);',
+  '  f = f*f*(3.0 - 2.0*f);',
+  '  return mix(mix(hash(i), hash(i + vec2(1, 0)), f.x), mix(hash(i + vec2(0, 1)), hash(i + vec2(1, 1)), f.x), f.y);',
+  '}',
+  'void main(){',
+  '  float across = abs(vUv.y);',
+  '  float core = smoothstep(1.0, 0.08, across);',
+  '  float flow = vUv.x*0.5 - uTime*0.85;',
+  '  float n = vnoise(vec2(flow*7.0, vUv.y*2.2 + flow*1.6)) * 0.65 + vnoise(vec2(flow*17.0, vUv.y*5.0)) * 0.35;',
+  '  float glint = smoothstep(0.70, 0.96, n) * (0.55 + 0.45*sin(uTime*2.1 + vUv.x*9.0));',
+  '  vec3 deep = vec3(0.40, 0.21, 0.045);',
+  '  vec3 gold = vec3(1.0, 0.74, 0.32);',
+  '  vec3 hot  = vec3(1.0, 0.93, 0.66);',
+  '  vec3 col = mix(deep, gold, core);',
+  '  col += hot * glint * (0.30 + core*0.85);',
+  '  col += vec3(1.0, 0.86, 0.55) * vFall * (0.5 + 0.5*sin(uTime*10.0 + vUv.x*46.0));',
+  '  col *= (0.34 + 1.35*vLit);',
+  '  float aMain = 0.55 + 0.45*core;',
+  '  float aHalo = 0.13 * core;',
+  '  float alpha = mix(aMain, aHalo, uHalo);',
+  '  gl_FragColor = vec4(col, alpha);',
+  '}'
+].join('\n');
+function riverMaterial(halo){
+  var u = { uTime: riverUniforms.uTime, uHalo: { value: halo ? 1 : 0 } };
+  return new THREE.ShaderMaterial({
+    uniforms: u, vertexShader: riverVert, fragmentShader: riverFrag,
+    transparent: true, depthWrite: false,
+    blending: halo ? THREE.AdditiveBlending : THREE.NormalBlending,
+    side: THREE.DoubleSide, fog: false
+  });
+}
+var riverGroup = new THREE.Group();
+scene.add(riverGroup);
+var riverLitAttr = null;
+
+function buildRiver(){
+  while(riverGroup.children.length){
+    var ch = riverGroup.children.pop();
+    ch.geometry.dispose();
+    riverGroup.remove(ch);
+  }
+  var flow = ikComputeFlow(heights);
+  var path = ikTracePath(heights, flow.acc);
+  if(path.length < 8) return;
+  /* Chaikin smoothing, two passes, in grid space */
+  function chaikin(pts){
+    var out = [pts[0]];
+    for(var i=0;i<pts.length-1;i++){
+      var a = pts[i], b = pts[i+1];
+      out.push({ x: a.x*0.75 + b.x*0.25, y: a.y*0.75 + b.y*0.25, acc: a.acc*0.75 + b.acc*0.25 });
+      out.push({ x: a.x*0.25 + b.x*0.75, y: a.y*0.25 + b.y*0.75, acc: a.acc*0.25 + b.acc*0.75 });
+    }
+    out.push(pts[pts.length-1]);
+    return out;
+  }
+  var pts = chaikin(chaikin(path));
+  var n = pts.length;
+  var centers = [], widths = [], falls = [], lens = [];
+  var totalLen = 0;
+  for(var i=0;i<n;i++){
+    var w = gridToWorld(pts[i].x, pts[i].y);
+    centers.push(new THREE.Vector3(w.x, terrainYWorld(w.x, w.z), w.z));
+    if(i>0) totalLen += centers[i].distanceTo(centers[i-1]);
+    lens.push(totalLen);
+  }
+  for(i=0;i<n;i++){
+    var p0 = centers[Math.max(0, i-1)], p1 = centers[Math.min(n-1, i+1)];
+    var slope = Math.abs(ikHeightAtRaw(pts[i].x, pts[i].y) - ikHeightAtRaw(pts[Math.max(0,i-1)].x, pts[Math.max(0,i-1)].y));
+    var wid = ikClamp(0.7 + Math.sqrt(Math.max(1, pts[i].acc))*0.085, 0.7, 4.4);
+    if(slope < 0.35) wid *= 1.7;                       /* pools widen on the flats */
+    widths.push(wid);
+    falls.push(slope > 2.1 ? 1 : 0);
+  }
+  function ribbonGeo(widthScale, lift){
+    var posArr = new Float32Array(n*2*3);
+    var uvArr = new Float32Array(n*2*2);
+    var fallArr = new Float32Array(n*2);
+    var litArr = new Float32Array(n*2);
+    var idxArr = [];
+    for(var i=0;i<n;i++){
+      var c = centers[i];
+      var cPrev = centers[Math.max(0, i-1)], cNext = centers[Math.min(n-1, i+1)];
+      var tx = cNext.x - cPrev.x, tz = cNext.z - cPrev.z;
+      var tl = Math.hypot(tx, tz) || 1; tx /= tl; tz /= tl;
+      var px = -tz, pz = tx;
+      var hw = widths[i]*widthScale/2;
+      for(var s=0;s<2;s++){
+        var sgn = s === 0 ? -1 : 1;
+        var vx = c.x + px*hw*sgn, vz = c.z + pz*hw*sgn;
+        var vi = (i*2 + s);
+        posArr[vi*3] = vx;
+        posArr[vi*3+1] = terrainYWorld(vx, vz) + lift;
+        posArr[vi*3+2] = vz;
+        uvArr[vi*2] = lens[i]/3;
+        uvArr[vi*2+1] = sgn;
+        fallArr[vi] = falls[i];
+        litArr[vi] = 0;
+      }
+      if(i<n-1){
+        var a = i*2, b = i*2+1, c2 = i*2+2, d2 = i*2+3;
+        idxArr.push(a, b, c2, b, d2, c2);
+      }
+    }
+    var g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(posArr, 3));
+    g.setAttribute('uv', new THREE.BufferAttribute(uvArr, 2));
+    g.setAttribute('aFall', new THREE.BufferAttribute(fallArr, 1));
+    g.setAttribute('aLit', new THREE.BufferAttribute(litArr, 1));
+    g.setIndex(idxArr);
+    return g;
+  }
+  var halo = new THREE.Mesh(ribbonGeo(2.1, 0.07), riverMaterial(true));
+  halo.renderOrder = 2;
+  riverGroup.add(halo);
+  var main = new THREE.Mesh(ribbonGeo(1.0, 0.16), riverMaterial(false));
+  main.renderOrder = 3;
+  riverGroup.add(main);
+  riverLitAttr = [
+    halo.geometry.attributes.aLit,
+    main.geometry.attributes.aLit
+  ];
+  riverGroup.userData.centers = centers;
+}
+function ikHeightAtRaw(gx, gy){
+  gx = ikClamp(Math.round(gx), 0, IK_GRID); gy = ikClamp(Math.round(gy), 0, IK_GRID);
+  return heights[gy*HN + gx];
+}
+buildRiver();
+
+/* per-frame: how strongly the shaft strikes each river vertex */
+var _v = new THREE.Vector3();
+var _axis = new THREE.Vector3();
+var _toP = new THREE.Vector3();
+function beamFlareAt(p){
+  _axis.subVectors(beamTarget, beamOrigin);
+  _toP.subVectors(p, beamOrigin);
+  var t = _toP.dot(_axis) / _axis.lengthSq();
+  t = ikClamp(t, 0, 1);
+  _v.copy(beamOrigin).addScaledVector(_axis, t);
+  var d = _v.distanceTo(p);
+  var beamR = 6 + 21*t;
+  return Math.exp(-(d*d)/(beamR*beamR)) ;
+}
+function updateRiverLight(){
+  if(!riverLitAttr) return;
+  var centers = riverGroup.userData.centers;
+  if(!centers) return;
+  for(var a=0;a<riverLitAttr.length;a++){
+    var attr = riverLitAttr[a];
+    for(var i=0;i<centers.length;i++){
+      var f = beamFlareAt(centers[i]);
+      attr.setX(i*2, f);
+      attr.setX(i*2+1, f);
+    }
+    attr.needsUpdate = true;
+  }
+}
+
+/* ---------- painted heroes ---------- */
+var heroes = [];
+var pavilionHero = null, haloSprite = null;
+var blossomPts = [];
+function makeHero(tex, wWorld, hWorld, gx, gy, opts){
+  opts = opts || {};
+  var geo = new THREE.PlaneGeometry(wWorld, hWorld);
+  if(!opts.center) geo.translate(0, hWorld/2, 0);
+  var mat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false, fog: false });
+  var m = new THREE.Mesh(geo, mat);
+  var w = gridToWorld(gx, gy);
+  var y = opts.floatY !== undefined ? opts.floatY : terrainYWorld(w.x, w.z);
+  m.position.set(w.x, y + (opts.lift || 0), w.z);
+  m.rotation.y = Math.atan2(camera.position.x - w.x, camera.position.z - w.z);
+  if(opts.flip) m.scale.x = -1;
+  m.renderOrder = 2;
+  scene.add(m);
+  m.userData.baseY = m.position.y;
+  m.userData.centerLift = opts.center ? 0 : hWorld/2;
+  m.userData.float = (opts.floatY !== undefined);
+  m.userData.phase = (heroes.length * 1.93) % 6.28;
+  heroes.push(m);
+  return m;
+}
+var texLoader = new THREE.TextureLoader();
+function loadHeroes(){
+  var files = { pavilion: 'art/pavilion.webp', blossom: 'art/blossom.webp', pine: 'art/pine.webp', rock: 'art/rock.webp' };
+  var tex = {};
+  var names = Object.keys(files);
+  var done = 0;
+  names.forEach(function(name){
+    texLoader.load(files[name], function(t){
+      tex[name] = t;
+      done++;
+      if(done === names.length) placeHeroes(tex);
+    }, undefined, function(){
+      done++;
+      if(done === names.length) placeHeroes(tex);
+    });
+  });
+}
+function placeHeroes(tex){
+  if(tex.pavilion){
+    pavilionHero = makeHero(tex.pavilion, 15, 15, IK_PAV.x + 3, IK_PAV.y - 2, { lift: -0.4 });
+    var haloTex = makeRadialTex(128, 'rgba(255,196,110,0.85)', 'rgba(255,196,110,0)');
+    haloSprite = new THREE.Mesh(
+      new THREE.PlaneGeometry(23, 23),
+      new THREE.MeshBasicMaterial({ map: haloTex, transparent: true, opacity: 0.3, blending: THREE.AdditiveBlending, depthWrite: false, fog: false })
+    );
+    var pw = gridToWorld(IK_PAV.x + 3, IK_PAV.y - 2);
+    haloSprite.position.set(pw.x, pavilionHero.position.y + 7.5, pw.z - 1.5);
+    haloSprite.renderOrder = 1;
+    scene.add(haloSprite);
+  }
+  if(tex.blossom){
+    var b1 = makeHero(tex.blossom, 9.8, 13, IK_PAV.x + 7, IK_PAV.y + 7, {});
+    var b2 = makeHero(tex.blossom, 7.5, 10, IK_SPRING.x - 6, IK_SPRING.y + 11, { flip: true });
+    blossomPts.push(new THREE.Vector3(b1.position.x, b1.position.y + 10.5, b1.position.z));
+    blossomPts.push(new THREE.Vector3(b2.position.x, b2.position.y + 8, b2.position.z));
+  }
+  if(tex.pine){
+    makeHero(tex.pine, 12, 12, ikChannelX(46) - 30, 46, {});
+    makeHero(tex.pine, 13, 13, ikChannelX(118) + 32, 118, {});
+    makeHero(tex.pine, 10, 10, ikChannelX(30) + 27, 30, {});
+  }
+  if(tex.rock){
+    var r1w = gridToWorld(26, 34), r2w = gridToWorld(138, 52);
+    makeHero(tex.rock, 19, 12.7, 26, 34, { center: true, floatY: terrainYWorld(r1w.x, r1w.z) + 17 });
+    makeHero(tex.rock, 15, 10, 138, 52, { center: true, floatY: terrainYWorld(r2w.x, r2w.z) + 21, flip: true });
+  }
+  startPetals();
+  var veil = document.getElementById('veil');
+  veil.style.opacity = '0';
+  setTimeout(function(){ veil.style.display = 'none'; }, 1300);
+}
+
+/* ---------- petals: they fall where the light touches blossom ---------- */
+var PETALS = REDUCED ? 55 : 120;
+var petalState = [];
+var petalGeo = null;
+function startPetals(){
+  if(petalGeo || !blossomPts.length) return;
+  petalGeo = new THREE.BufferGeometry();
+  var arr = new Float32Array(PETALS*3);
+  for(var i=0;i<PETALS;i++){
+    petalState.push({ x: 0, y: -999, z: 0, ph: Math.random()*6.28, sp: 0.55 + Math.random()*0.7, tree: i % blossomPts.length });
+    arr[i*3+1] = -999;
+  }
+  petalGeo.setAttribute('position', new THREE.BufferAttribute(arr, 3));
+  var pts = new THREE.Points(petalGeo, new THREE.PointsMaterial({
+    map: softDotTex, color: 0xeaa9c2, size: 1.05, sizeAttenuation: true,
+    transparent: true, opacity: 0.85, depthWrite: false
+  }));
+  pts.renderOrder = 5;
+  scene.add(pts);
+}
+function updatePetals(dt, t){
+  if(!petalGeo) return;
+  var attr = petalGeo.attributes.position;
+  var flares = blossomPts.map(function(p){ return beamFlareAt(p); });
+  for(var i=0;i<PETALS;i++){
+    var s = petalState[i];
+    if(s.y < -100){
+      if(Math.random() < flares[s.tree] * 0.06){
+        var c = blossomPts[s.tree];
+        s.x = c.x + (Math.random()-0.5)*7;
+        s.y = c.y + (Math.random()-0.5)*2;
+        s.z = c.z + (Math.random()-0.5)*2;
+      }
+    } else {
+      s.y -= s.sp * dt;
+      s.x += Math.sin(t*1.25 + s.ph) * dt * 1.15;
+      s.z += Math.cos(t*0.9 + s.ph) * dt * 0.5;
+      if(s.y < terrainYWorld(s.x, s.z) + 0.25) s.y = -999;
+    }
+    attr.setXYZ(i, s.x, s.y, s.z);
+  }
+  attr.needsUpdate = true;
+}
+
+/* ---------- dust puffs at the sculpt brush ---------- */
+var puffs = [];
+(function(){
+  var puffTex = makeRadialTex(64, 'rgba(216,182,130,0.9)', 'rgba(216,182,130,0)');
+  for(var i=0;i<10;i++){
+    var s = new THREE.Sprite(new THREE.SpriteMaterial({ map: puffTex, transparent: true, opacity: 0, depthWrite: false }));
+    s.scale.set(2, 2, 1);
+    s.visible = false;
+    s.renderOrder = 6;
+    scene.add(s);
+    puffs.push({ s: s, life: 0 });
+  }
+})();
+var puffIdx = 0;
+function spawnPuff(p){
+  var pf = puffs[puffIdx++ % puffs.length];
+  pf.life = 0.75;
+  pf.s.visible = true;
+  pf.s.position.set(p.x + (Math.random()-0.5)*2, p.y + 0.6, p.z + (Math.random()-0.5)*2);
+}
+function updatePuffs(dt){
+  for(var i=0;i<puffs.length;i++){
+    var pf = puffs[i];
+    if(pf.life <= 0) continue;
+    pf.life -= dt;
+    var k = Math.max(0, pf.life / 0.75);
+    pf.s.material.opacity = 0.34 * k;
+    var sc = 2 + (1-k)*4.5;
+    pf.s.scale.set(sc, sc, 1);
+    pf.s.position.y += dt * 1.6;
+    if(pf.life <= 0) pf.s.visible = false;
+  }
+}
+/* ---------- painterly pass: Kuwahara oil filter, impasto, grain, vignette ---------- */
+var RT_FRAC = 0.55;                 /* painterly pass runs at 55 percent of the buffer */
+var KUWAHARA_R = 3;                 /* quadrant radius in target texels */
+function makeRT(){
+  var w = Math.max(2, Math.floor(renderer.domElement.width * RT_FRAC));
+  var h = Math.max(2, Math.floor(renderer.domElement.height * RT_FRAC));
+  return new THREE.WebGLRenderTarget(w, h, {
+    minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, depthBuffer: true
+  });
+}
+var rt = makeRT();
+var postMat = new THREE.ShaderMaterial({
+  uniforms: {
+    tDiffuse: { value: rt.texture },
+    uTexel: { value: new THREE.Vector2(1/rt.width, 1/rt.height) },
+    uRadius: { value: KUWAHARA_R }
+  },
+  vertexShader: [
+    'varying vec2 vUv;',
+    'void main(){ vUv = position.xy*0.5 + 0.5; gl_Position = vec4(position.xy, 0.0, 1.0); }'
+  ].join('\n'),
+  fragmentShader: [
+    'uniform sampler2D tDiffuse;',
+    'uniform vec2 uTexel;',
+    'varying vec2 vUv;',
+    'float luma(vec3 c){ return dot(c, vec3(0.299, 0.587, 0.114)); }',
+    'vec4 quad(vec2 uv, vec2 s){',
+    '  vec3 m = vec3(0.0); vec3 m2 = vec3(0.0);',
+    '  for(int i=0;i<=3;i++){',
+    '    for(int j=0;j<=3;j++){',
+    '      vec3 c = texture2D(tDiffuse, uv + vec2(s.x*float(i), s.y*float(j))*uTexel).rgb;',
+    '      m += c; m2 += c*c;',
+    '    }',
+    '  }',
+    '  m /= 16.0; m2 /= 16.0;',
+    '  vec3 varv = abs(m2 - m*m);',
+    '  return vec4(m, varv.r + varv.g + varv.b);',
+    '}',
+    'void main(){',
+    '  float lL = luma(texture2D(tDiffuse, vUv + vec2(-uTexel.x, 0.0)).rgb);',
+    '  float lR = luma(texture2D(tDiffuse, vUv + vec2( uTexel.x, 0.0)).rgb);',
+    '  float lB = luma(texture2D(tDiffuse, vUv + vec2(0.0, -uTexel.y)).rgb);',
+    '  float lT = luma(texture2D(tDiffuse, vUv + vec2(0.0,  uTexel.y)).rgb);',
+    '  vec2 grad = vec2(lR - lL, lT - lB);',
+    '  vec2 uv = vUv + grad * 4.8 * uTexel;',
+    '  vec4 q1 = quad(uv, vec2(-1.0, -1.0));',
+    '  vec4 q2 = quad(uv, vec2( 1.0, -1.0));',
+    '  vec4 q3 = quad(uv, vec2(-1.0,  1.0));',
+    '  vec4 q4 = quad(uv, vec2( 1.0,  1.0));',
+    '  vec3 col = q1.rgb; float best = q1.a;',
+    '  if(q2.a < best){ best = q2.a; col = q2.rgb; }',
+    '  if(q3.a < best){ best = q3.a; col = q3.rgb; }',
+    '  if(q4.a < best){ best = q4.a; col = q4.rgb; }',
+    '  float shade = dot(grad, normalize(vec2(-0.55, 0.83)));',
+    '  col *= 1.0 + clamp(shade*5.0, -0.22, 0.30);',
+    '  float g1 = fract(sin(dot(floor(vUv*vec2(880.0, 1320.0)), vec2(12.9898, 78.233))) * 43758.5453);',
+    '  col *= 0.965 + 0.055*g1;',
+    '  col *= 1.0 + 0.010*sin(vUv.y*2400.0);',
+    '  float d = distance(vUv, vec2(0.5, 0.46));',
+    '  col *= mix(0.42, 1.0, smoothstep(0.95, 0.36, d));',
+    '  gl_FragColor = vec4(col, 1.0);',
+    '}'
+  ].join('\n'),
+  depthTest: false, depthWrite: false
+});
+var postScene = new THREE.Scene();
+var postCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+postScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), postMat));
+
+/* ---------- sculpt: the one verb ---------- */
+var sculptMode = 1;
+var chipRaise = document.getElementById('chipRaise');
+var chipLower = document.getElementById('chipLower');
+function setMode(m){
+  sculptMode = m;
+  chipRaise.className = 'chip' + (m > 0 ? ' on' : '');
+  chipLower.className = 'chip' + (m < 0 ? ' on' : '');
+}
+chipRaise.addEventListener('click', function(){ setMode(1); });
+chipLower.addEventListener('click', function(){ setMode(-1); });
+
+var raycaster = new THREE.Raycaster();
+var pointerNdc = new THREE.Vector2();
+var brushPoint = null;
+var sculpting = false;
+var brushRing = new THREE.Mesh(
+  new THREE.RingGeometry(6.1, 7.0, 44),
+  new THREE.MeshBasicMaterial({ color: 0xe8c987, transparent: true, opacity: 0.55, side: THREE.DoubleSide, depthWrite: false, fog: false })
+);
+brushRing.rotation.x = -Math.PI/2;
+brushRing.visible = false;
+brushRing.renderOrder = 6;
+scene.add(brushRing);
+
+function castToTerrain(ev){
+  var rect = renderer.domElement.getBoundingClientRect();
+  pointerNdc.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
+  pointerNdc.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1;
+  raycaster.setFromCamera(pointerNdc, camera);
+  var hits = raycaster.intersectObject(terrain);
+  return hits.length ? hits[0].point : null;
+}
+var dom = renderer.domElement;
+dom.addEventListener('pointerdown', function(ev){
+  var p = castToTerrain(ev);
+  if(p){ brushPoint = p; sculpting = true; try{ dom.setPointerCapture(ev.pointerId); }catch(e){} }
+});
+dom.addEventListener('pointermove', function(ev){
+  var p = castToTerrain(ev);
+  if(p) brushPoint = p;
+});
+function endSculpt(){
+  if(!sculpting) return;
+  sculpting = false;
+  buildRiver();
+}
+dom.addEventListener('pointerup', endSculpt);
+dom.addEventListener('pointercancel', endSculpt);
+
+var BRUSH_R = 9;                    /* grid cells */
+function applyBrush(dt){
+  if(!brushPoint) return;
+  var gx = (brushPoint.x/IK_SPAN + 0.5)*IK_GRID;
+  var gy = (brushPoint.z/IK_SPAN + 0.5)*IK_GRID;
+  var amt = sculptMode * 9.5 * dt;
+  var x0 = Math.max(0, Math.floor(gx - BRUSH_R)), x1 = Math.min(IK_GRID, Math.ceil(gx + BRUSH_R));
+  var y0 = Math.max(0, Math.floor(gy - BRUSH_R)), y1 = Math.min(IK_GRID, Math.ceil(gy + BRUSH_R));
+  var changed = false;
+  for(var y=y0;y<=y1;y++) for(var x=x0;x<=x1;x++){
+    var d = Math.hypot(x - gx, y - gy);
+    if(d > BRUSH_R) continue;
+    var f = 0.5 + 0.5*Math.cos(Math.PI * d / BRUSH_R);
+    if(f <= 0) continue;
+    heights[y*HN + x] += amt * f;
+    changed = true;
+  }
+  if(!changed) return;
+  var pos = terrainGeo.attributes.position;
+  var colAttr = terrainGeo.attributes.color;
+  var colors = colAttr.array;
+  for(var vi=0; vi<pos.count; vi++){
+    var wx = pos.getX(vi), wz = pos.getZ(vi);
+    var vx = Math.round((wx/IK_SPAN + 0.5)*IK_GRID), vy = Math.round((wz/IK_SPAN + 0.5)*IK_GRID);
+    if(vx < x0-1 || vx > x1+1 || vy < y0-1 || vy > y1+1) continue;
+    pos.setY(vi, heights[vy*HN + vx] * IK_HSCALE);
+    paintVertex(colors, vi, vx, vy);
+  }
+  pos.needsUpdate = true;
+  colAttr.needsUpdate = true;
+  terrainGeo.computeVertexNormals();
+  spawnPuff(brushPoint);
+}
+
+/* ---------- hero tinting by the shaft ---------- */
+var _c = new THREE.Vector3();
+function updateHeroes(t){
+  for(var i=0;i<heroes.length;i++){
+    var h = heroes[i];
+    _c.copy(h.position);
+    _c.y += h.userData.centerLift || 4;
+    var flare = beamFlareAt(_c);
+    var s = 0.13 + 1.08*flare;
+    if(h === pavilionHero) s *= 0.93 + 0.05*Math.sin(t*11.3) + 0.03*Math.sin(t*23.7 + 1.7);
+    h.material.color.setRGB(s, s*0.93, s*0.80);
+    if(h.userData.float) h.position.y = h.userData.baseY + Math.sin(t*0.22 + h.userData.phase)*0.55;
+  }
+  if(haloSprite && pavilionHero){
+    _c.copy(pavilionHero.position); _c.y += 7;
+    var f = beamFlareAt(_c);
+    haloSprite.material.opacity = 0.10 + 0.42*f + 0.03*Math.sin(t*9.1) + 0.02*Math.sin(t*17.3);
+  }
+}
+
+/* ---------- main loop ---------- */
+var clock = new THREE.Clock();
+var elapsed = 0;
+function animate(){
+  requestAnimationFrame(animate);
+  var dt = Math.min(clock.getDelta(), 0.05);
+  elapsed += dt;
+  var t = elapsed;
+  updateBeam(t);
+  /* dust motes drift inside the beam */
+  (function(){
+    var attr = moteGeo.attributes.position;
+    for(var i=0;i<MOTES;i++){
+      var ph = motePhase[i];
+      attr.setXYZ(i,
+        moteBase[i*3]   + Math.sin(t*0.30 + ph)*0.7,
+        moteBase[i*3+1] + Math.sin(t*0.23 + ph*1.7)*0.7,
+        moteBase[i*3+2] + Math.sin(t*0.11 + ph*0.6)*1.4);
+    }
+    attr.needsUpdate = true;
+  })();
+  for(var mi=0; mi<mists.length; mi++){
+    var m = mists[mi];
+    m.position.x += Math.sin(t*0.05 + m.userData.phase)*0.0035;
+    m.material.opacity = 0.45 + 0.14*Math.sin(t*0.07 + m.userData.phase*2.0);
+  }
+  if(sculpting) applyBrush(dt);
+  if(brushPoint){
+    brushRing.visible = true;
+    brushRing.position.set(brushPoint.x, brushPoint.y + 0.3, brushPoint.z);
+  } else brushRing.visible = false;
+  updateHeroes(t);
+  updatePetals(dt, t);
+  updatePuffs(dt);
+  riverUniforms.uTime.value = t;
+  updateRiverLight();
+  if(!REDUCED){
+    camera.position.x = Math.sin(t*0.045)*2.2;
+    camera.position.y = 58 + Math.sin(t*0.033)*1.4;
+  }
+  camera.lookAt(0, 5, -2);
+  renderer.setRenderTarget(rt);
+  renderer.render(scene, camera);
+  renderer.setRenderTarget(null);
+  renderer.render(postScene, postCam);
+}
+
+window.addEventListener('resize', function(){
+  camera.aspect = window.innerWidth/window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  var nrt = makeRT();
+  rt.dispose();
+  rt = nrt;
+  postMat.uniforms.tDiffuse.value = rt.texture;
+  postMat.uniforms.uTexel.value.set(1/rt.width, 1/rt.height);
+});
+
+loadHeroes();
+setTimeout(function(){
+  var veil = document.getElementById('veil');
+  if(veil.style.display !== 'none'){
+    veil.style.opacity = '0';
+    setTimeout(function(){ veil.style.display = 'none'; }, 1300);
+  }
+}, 9000);
+updateBeam(0);
+animate();
+
+/* debug handle for the smoke harness */
+window.__IK = { scene: scene, camera: camera, renderer: renderer, heights: heights, beamFlareAt: beamFlareAt, buildRiver: buildRiver };
+})();
+</script>
+</body>
+</html>
